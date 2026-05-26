@@ -53,6 +53,7 @@ namespace Qtab
         // 统计信息（由 LoadSheets 传入）
         private int _totalSheets = 0;
         private int _hiddenSheets = 0;
+        private int _matchSheets = 0;
 
         // 标志：程序性修改搜索框文本时，禁止触发过滤
         private bool _suppressFilter = false;
@@ -152,6 +153,18 @@ namespace Qtab
                 if (_suppressFilter) return;
                 if (_search.ForeColor == System.Drawing.Color.Gray) return;
                 Filter(_search.Text);
+            };
+            _search.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Escape && _search.ForeColor != System.Drawing.Color.Gray)
+                {
+                    _suppressFilter = true;
+                    _search.Text = string.Empty;
+                    _suppressFilter = false;
+                    Filter(string.Empty);
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                }
             };
 
             // 将 `SheetTabList` 的事件转发给宿主（通过本控件暴露的事件）
@@ -257,16 +270,12 @@ namespace Qtab
                 term = _search.Text;
             }
 
-            if (string.IsNullOrWhiteSpace(term))
-            {
-                _list.LoadSheets(_all);
-            }
-            else
-            {
-                var filtered = _all.FindAll(x => x.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0);
-                _list.LoadSheets(filtered);
-            }
+            var filtered = string.IsNullOrWhiteSpace(term)
+                ? _all
+                : _all.FindAll(x => x.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0);
 
+            _matchSheets = filtered.Count;
+            _list.LoadSheets(filtered);
             UpdateStatsLabel();
         }
 
@@ -275,7 +284,14 @@ namespace Qtab
         /// </summary>
         private void UpdateStatsLabel()
         {
-            _statsLabel.Text = string.Format("Total: {0} | Hidden: {1}", _totalSheets, _hiddenSheets);
+            if (_search != null && _search.ForeColor != System.Drawing.Color.Gray && !string.IsNullOrWhiteSpace(_search.Text))
+            {
+                _statsLabel.Text = string.Format("Total: {0} | Hidden: {1} | Match: {2}", _totalSheets, _hiddenSheets, _matchSheets);
+            }
+            else
+            {
+                _statsLabel.Text = string.Format("Total: {0} | Hidden: {1}", _totalSheets, _hiddenSheets);
+            }
         }
 
         /// <summary>
@@ -318,7 +334,9 @@ namespace Qtab
             var filtered = string.IsNullOrWhiteSpace(term)
                 ? _all
                 : _all.FindAll(x => x.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0);
+            _matchSheets = filtered.Count;
             _list.LoadSheets(filtered);
+            UpdateStatsLabel();
         }
 
         // 宿主用于应用工作表颜色映射

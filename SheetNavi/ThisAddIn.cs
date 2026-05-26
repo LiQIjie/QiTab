@@ -55,6 +55,50 @@ namespace Qtab
         // 生产环境日志：此处保留空实现，避免磁盘 IO
         private void Log(string fmt, params object[] args) { /* no-operate in release */ }
 
+        // 防止刷新重入造成 UI 抖动
+        private bool _isRefreshing = false;
+
+        /// <summary>
+        /// 统一刷新请求入口，避免到处重复 Stop/Start 计时器代码。
+        /// </summary>
+        private void RequestRefresh(int debounceMs = 200)
+        {
+            try
+            {
+                if (_refreshTimer == null)
+                {
+                    RefreshSheetList();
+                    return;
+                }
+
+                if (debounceMs < 1) debounceMs = 1;
+                _refreshTimer.Stop();
+                _refreshTimer.Interval = debounceMs;
+                _refreshTimer.Start();
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 获取工作簿可见工作表名（按 Index 顺序）。
+        /// </summary>
+        private List<string> GetVisibleSheetNames(Excel.Workbook wb)
+        {
+            try
+            {
+                if (wb == null) return new List<string>();
+                return wb.Worksheets.Cast<Excel.Worksheet>()
+                    .Where(w => { try { return w.Visible == Excel.XlSheetVisibility.xlSheetVisible; } catch { return true; } })
+                    .OrderBy(w => w.Index)
+                    .Select(w => w.Name)
+                    .ToList();
+            }
+            catch
+            {
+                return new List<string>();
+            }
+        }
+
         /// <summary>
         /// 加载项启动：创建 UI 控件与任务面板，配置计时器与订阅 Excel 事件。
         /// </summary>
@@ -75,9 +119,12 @@ namespace Qtab
                 try
                 {
                     _refreshTimer.Stop();
+                    if (_isRefreshing) return;
+                    _isRefreshing = true;
                     RefreshSheetList();
                 }
                 catch (Exception ex) { Log("Refresh timer exception: {0}", ex.Message); }
+                finally { _isRefreshing = false; }
             };
 
             // **新增**：创建轻量轮询计时器以检测未触发事件的移动/复制
@@ -91,11 +138,7 @@ namespace Qtab
                     if (wb == null) return;
                     var key = GetWorkbookKey(wb);
 
-                    var visibleSheets = wb.Worksheets.Cast<Excel.Worksheet>()
-                        .Where(w => { try { return w.Visible == Excel.XlSheetVisibility.xlSheetVisible; } catch { return true; } })
-                        .OrderBy(w => w.Index)
-                        .Select(w => w.Name)
-                        .ToList();
+                    var visibleSheets = GetVisibleSheetNames(wb);
                     var visibleCount = visibleSheets.Count;
 
                     bool needRefresh = false;
@@ -113,7 +156,7 @@ namespace Qtab
                     {
                         _sheetCountsByWorkbook[key] = visibleCount;
                         _sheetOrderByWorkbook[key] = new List<string>(visibleSheets);
-                        RefreshSheetList();
+                        RequestRefresh(120);
                     }
                 }
                 catch { }
@@ -127,9 +170,9 @@ namespace Qtab
             {
                 try
                 {
-                    _refreshTimer.Stop();
-                    _refreshTimer.Interval = 200;
-                    _refreshTimer.Start();
+                    // 新增/复制工作表：使用防抖请求，避免连发时重复全量刷新
+                    RequestRefresh(120);
+
                     EnsurePaneExists();
                     TryAddPlyContextItems();
                     PostShowPane();
@@ -141,9 +184,7 @@ namespace Qtab
             //{
             //    try
             //    {
-            //        _refreshTimer.Stop();
-            //        _refreshTimer.Interval = 200;
-            //        _refreshTimer.Start();
+            //        RequestRefresh(200);
             //        EnsurePaneExists();
             //        TryAddPlyContextItems();
             //        PostShowPane();
@@ -158,18 +199,12 @@ namespace Qtab
                     EnsurePaneExists();
                     TryAddPlyContextItems();
 
-                    // 开启轮询以捕捉未触发事件的移动/复制
                     try { _pollTimer?.Start(); } catch { }
 
-                    // **新增**：窗口激活时也进行一次工作表数量与顺序检查，兜底刷新
                     try
                     {
                         var key = GetWorkbookKey(wb);
-                        var visibleSheets = wb.Worksheets.Cast<Excel.Worksheet>()
-                            .Where(w => { try { return w.Visible == Excel.XlSheetVisibility.xlSheetVisible; } catch { return true; } })
-                            .OrderBy(w => w.Index)
-                            .Select(w => w.Name)
-                            .ToList();
+                        var visibleSheets = GetVisibleSheetNames(wb);
                         var visibleCount = visibleSheets.Count;
 
                         bool needRefresh = false;
@@ -187,7 +222,7 @@ namespace Qtab
                         {
                             _sheetCountsByWorkbook[key] = visibleCount;
                             _sheetOrderByWorkbook[key] = new List<string>(visibleSheets);
-                            RefreshSheetList();
+                            RequestRefresh(150);
                         }
                         else if (!_sheetCountsByWorkbook.ContainsKey(key))
                         {
@@ -207,51 +242,27 @@ namespace Qtab
                 {
                     try
                     {
-                        // 高亮并刷新（确保颜色在激活时同步到侧边栏）
                         var ctrl = GetControlForActiveWindow();
                         ctrl?.Highlight(ws.Name);
-                        RefreshSheetList();
                     }
-                    catch (Exception ex) { Log("SheetActivate highlight/refresh error: {0}", ex.Message); }
+                    catch (Exception ex) { Log("SheetActivate highlight error: {0}", ex.Message); }
 
-                    // **新增**：在激活时检查工作表数量与顺序是否变化（用于识别移动/复制）
                     try
                     {
                         var wb = this.Application.ActiveWorkbook;
                         if (wb != null)
                         {
                             var key = GetWorkbookKey(wb);
-                            var visibleSheets = wb.Worksheets.Cast<Excel.Worksheet>()
-                                .Where(w => { try { return w.Visible == Excel.XlSheetVisibility.xlSheetVisible; } catch { return true; } })
-                                .OrderBy(w => w.Index)
-                                .Select(w => w.Name)
-                                .ToList();
-                            var visibleCount = visibleSheets.Count;
+                            var visibleCount = GetVisibleSheetNames(wb).Count;
 
                             bool needRefresh = false;
                             if (_sheetCountsByWorkbook.TryGetValue(key, out var last) && last != visibleCount) needRefresh = true;
-                            if (_sheetOrderByWorkbook.TryGetValue(key, out var lastOrder))
-                            {
-                                if (lastOrder == null || lastOrder.Count != visibleSheets.Count || !lastOrder.SequenceEqual(visibleSheets)) needRefresh = true;
-                            }
-                            else
-                            {
-                                _sheetOrderByWorkbook[key] = new List<string>(visibleSheets);
-                            }
+                            else if (!_sheetCountsByWorkbook.ContainsKey(key)) _sheetCountsByWorkbook[key] = visibleCount;
 
-                            if (needRefresh)
-                            {
-                                _sheetCountsByWorkbook[key] = visibleCount;
-                                _sheetOrderByWorkbook[key] = new List<string>(visibleSheets);
-                                RefreshSheetList();
-                            }
-                            else if (!_sheetCountsByWorkbook.ContainsKey(key))
-                            {
-                                _sheetCountsByWorkbook[key] = visibleCount;
-                            }
+                            if (needRefresh) RequestRefresh(180);
                         }
                     }
-                    catch (Exception ex) { Log("SheetActivate order/count check error: {0}", ex.Message); }
+                    catch (Exception ex) { Log("SheetActivate count check error: {0}", ex.Message); }
                 }
             };
 
@@ -294,7 +305,7 @@ namespace Qtab
                     catch (Exception ex) { Log("SheetBeforeDelete handler error: {0}", ex.Message); }
                     finally
                     {
-                        try { _refreshTimer.Stop(); _refreshTimer.Interval = 200; _refreshTimer.Start(); } catch { }
+                        try { RequestRefresh(200); } catch { }
                         try { EnsurePaneExists(); } catch { }
                         try { PostShowPane(); } catch { }
                     }
@@ -313,12 +324,8 @@ namespace Qtab
             {
                 try
                 {
-                    // 新增/复制工作表：立即刷新列表（同时保留防抖以覆盖快速连发情况）
-                    try { RefreshSheetList(); } catch { }
-
-                    _refreshTimer.Stop();
-                    _refreshTimer.Interval = 200;
-                    _refreshTimer.Start();
+                    // 新增/复制工作表：使用防抖请求，避免连发时重复全量刷新
+                    RequestRefresh(120);
 
                     EnsurePaneExists();
                     TryAddPlyContextItems();
@@ -330,7 +337,7 @@ namespace Qtab
             app.SheetChange += (object sh, Excel.Range target) => { /* 可选：响应单元格更改 */ };
             app.SheetBeforeRightClick += (object sh, Excel.Range target, ref bool cancel) =>
             {
-                try { _refreshTimer.Stop(); _refreshTimer.Interval = 200; _refreshTimer.Start(); } catch (Exception ex) { Log("SheetBeforeRightClick Refresh error: {0}", ex.Message); }
+                try { RequestRefresh(200); } catch (Exception ex) { Log("SheetBeforeRightClick Refresh error: {0}", ex.Message); }
                 try { TryAddPlyContextItems(); } catch (Exception ex) { Log("TryAddPlyContextItems error: {0}", ex.Message); }
             };
 
@@ -1128,7 +1135,7 @@ namespace Qtab
             }
             catch (Exception ex)
             {
-                // 忽略
+                MessageBox.Show("重命名分组时出错：" + ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -1496,7 +1503,7 @@ namespace Qtab
         {
             try
             {
-                try { RefreshSheetList(); } catch { }
+                try { RequestRefresh(120); } catch { }
                 if (!_userClosedPane)
                 {
                     ShowPane();

@@ -50,6 +50,9 @@ namespace Qtab
         private HashSet<string> _selected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // 最近一次选择的工作表名（便于 Shift 多选）
         private string _lastSelected;
+        // 悬停状态（不改变选择，仅用于绘制反馈）
+        private string _hoverSheet;
+        private string _hoverGroup;
 
         // 绘制用字体（工作表行、分组行）
         private Font _sheetFont;
@@ -107,6 +110,16 @@ namespace Qtab
             MouseMove += OnMouseMove;
             MouseUp += OnMouseUp;
             MouseDoubleClick += OnMouseDoubleClick;
+            MouseLeave += (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(_hoverSheet) || !string.IsNullOrEmpty(_hoverGroup))
+                {
+                    _hoverSheet = null;
+                    _hoverGroup = null;
+                    Cursor = Cursors.Default;
+                    Invalidate();
+                }
+            };
             Resize += (s, e) => Invalidate();
             
             // 拖拽事件
@@ -272,6 +285,13 @@ namespace Qtab
             {
                 using (var b = new SolidBrush(Color.FromArgb(200, gm.Color))) g.FillRectangle(b, rect);
             }
+
+            // 悬停高亮（不覆盖分组色，仅做轻量叠加）
+            if (!string.IsNullOrEmpty(_hoverGroup) && string.Equals(_hoverGroup, gm.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                using (var b = new SolidBrush(Color.FromArgb(26, SystemColors.HotTrack))) g.FillRectangle(b, rect);
+            }
+
             // 折叠/展开标识区域
             var arrowRect = new Rectangle(rect.X + 6, rect.Y + (rect.Height - arrowSize) / 2, arrowSize, arrowSize);
             using (var p = new Pen(SystemColors.ControlDark, 1))
@@ -279,19 +299,16 @@ namespace Qtab
                 g.DrawRectangle(p, arrowRect);
                 using (var p2 = new Pen(SystemColors.ControlDarkDark, 2))
                 {
-                    // 画一条水平线（-）
                     g.DrawLine(p2, arrowRect.Left + 2, arrowRect.Top + arrowRect.Height / 2, arrowRect.Right - 2, arrowRect.Top + arrowRect.Height / 2);
-                    // 如果是折叠状态，再画一条垂直线（+ 的竖线），表示可展开
                     if (gm.Collapsed)
                     {
                         g.DrawLine(p2, arrowRect.Left + arrowRect.Width / 2, arrowRect.Top + 2, arrowRect.Left + arrowRect.Width / 2, arrowRect.Bottom - 2);
                     }
                 }
             }
-            // 分组名称文本区域与绘制
             var text = gm.Name;
             var textRect = new Rectangle(arrowRect.Right + 6, rect.Y, rect.Width - (arrowRect.Right + 6), rect.Height);
-            TextRenderer.DrawText(g, text, _groupFont, textRect, SystemColors.ControlText, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+            TextRenderer.DrawText(g, text, _groupFont, textRect, SystemColors.ControlText, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
         }
 
         /// <summary>
@@ -304,6 +321,10 @@ namespace Qtab
             {
                 using (var b = new SolidBrush(SystemColors.ActiveCaptionText)) g.FillRectangle(b, rect);
             }
+            else if (!string.IsNullOrEmpty(_hoverSheet) && string.Equals(_hoverSheet, name, StringComparison.OrdinalIgnoreCase))
+            {
+                using (var b = new SolidBrush(Color.FromArgb(24, SystemColors.Highlight))) g.FillRectangle(b, rect);
+            }
             else if (color != Color.Empty)
             {
                 using (var b = new SolidBrush(Color.FromArgb(24, color))) g.FillRectangle(b, rect);
@@ -311,7 +332,7 @@ namespace Qtab
             }
             var fore = sel ? SystemColors.HighlightText : SystemColors.ControlText;
             var textRect = new Rectangle(rect.X + 24, rect.Y, rect.Width - 24, rect.Height);
-            TextRenderer.DrawText(g, name, _sheetFont, textRect, fore, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+            TextRenderer.DrawText(g, name, _sheetFont, textRect, fore, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
         }
 
         /// <summary>
@@ -664,7 +685,7 @@ namespace Qtab
             var sheetHeight = Math.Max(_sheetFont.Height + 8, 22);
             var groupHeight = Math.Max(_groupFont.Height + 8, 24);
 
-            // 构建 sheet -> group 映射
+            // 构建 sheet -> group 显示名称映射
             var sheetToGroup = new Dictionary<string, GroupModel>(StringComparer.OrdinalIgnoreCase);
             foreach (var gm in _groups.Values)
             {
@@ -741,7 +762,7 @@ namespace Qtab
             var sheetHeight = Math.Max(_sheetFont.Height + 8, 22);
             var groupHeight = Math.Max(_groupFont.Height + 8, 24);
 
-            // 构建 sheet -> group 映射
+            // 构建 sheet -> group 显示名称映射
             var sheetToGroup = new Dictionary<string, GroupModel>(StringComparer.OrdinalIgnoreCase);
             foreach (var gm in _groups.Values)
             {
@@ -809,6 +830,23 @@ namespace Qtab
         /// </summary>
         private void OnMouseMove(object sender, MouseEventArgs e)
         {
+            if (!_isDragging)
+            {
+                var hover = HitTest(e.Location);
+                var newHoverSheet = hover != null && hover.Type == HitType.Sheet ? hover.Sheet : null;
+                var newHoverGroup = hover != null && hover.Type == HitType.GroupHeader ? hover.Group?.Name : null;
+
+                bool changed = !string.Equals(_hoverSheet, newHoverSheet, StringComparison.OrdinalIgnoreCase)
+                               || !string.Equals(_hoverGroup, newHoverGroup, StringComparison.OrdinalIgnoreCase);
+                if (changed)
+                {
+                    _hoverSheet = newHoverSheet;
+                    _hoverGroup = newHoverGroup;
+                    Invalidate();
+                }
+                Cursor = hover == null ? Cursors.Default : Cursors.Hand;
+            }
+
             if (e.Button != MouseButtons.Left || _dragStartHit == null) return;
             if (_isDragging) return;
 
@@ -818,7 +856,7 @@ namespace Qtab
             if (dx > DragThreshold || dy > DragThreshold)
             {
                 _isDragging = true;
-                
+
                 // 根据拖拽的是分组头还是工作表，准备不同的数据
                 object dragData = null;
                 if (_dragStartHit.Type == HitType.GroupHeader)
@@ -842,6 +880,7 @@ namespace Qtab
                         _isDragging = false;
                         _dragStartHit = null;
                         _dragOverHit = null;
+                        Cursor = Cursors.Default;
                         Invalidate();
                     }
                 }
