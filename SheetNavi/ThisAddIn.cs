@@ -49,6 +49,10 @@ namespace Qtab
 
         // 刷新用计时器：用于对频繁事件（如新建工作表）进行防抖，确保 Excel 新对象稳定后再刷新
         private System.Windows.Forms.Timer _refreshTimer;
+        // 工作表激活计时器：将快速连续点击合并为最后一次
+        private System.Windows.Forms.Timer _activateSheetTimer;
+        private string _pendingSheetToActivate;
+        private string _pendingWindowKeyToActivate;
         // **新增**：轻量轮询计时器，用于检测在 Excel 中拖拽移动/复制标签后未触发事件的变化
         private System.Windows.Forms.Timer _pollTimer;
 
@@ -110,6 +114,23 @@ namespace Qtab
 
             // 启动时刷新工具按钮状态
             try { UpdateToolButtonsStatus(); } catch { }
+
+            // 创建工作表激活计时器（极短延迟合并）
+            _activateSheetTimer = new System.Windows.Forms.Timer();
+            _activateSheetTimer.Interval = 1;
+            _activateSheetTimer.Tick += (s, ev) =>
+            {
+                try
+                {
+                    _activateSheetTimer.Stop();
+                    var target = _pendingSheetToActivate;
+                    var windowKey = _pendingWindowKeyToActivate;
+                    _pendingSheetToActivate = null;
+                    _pendingWindowKeyToActivate = null;
+                    if (!string.IsNullOrEmpty(target)) ActivateSheetForWindow(windowKey, target);
+                }
+                catch { }
+            };
 
             // 创建刷新计时器（200ms 防抖）
             _refreshTimer = new System.Windows.Forms.Timer();
@@ -246,23 +267,6 @@ namespace Qtab
                         ctrl?.Highlight(ws.Name);
                     }
                     catch (Exception ex) { Log("SheetActivate highlight error: {0}", ex.Message); }
-
-                    try
-                    {
-                        var wb = this.Application.ActiveWorkbook;
-                        if (wb != null)
-                        {
-                            var key = GetWorkbookKey(wb);
-                            var visibleCount = GetVisibleSheetNames(wb).Count;
-
-                            bool needRefresh = false;
-                            if (_sheetCountsByWorkbook.TryGetValue(key, out var last) && last != visibleCount) needRefresh = true;
-                            else if (!_sheetCountsByWorkbook.ContainsKey(key)) _sheetCountsByWorkbook[key] = visibleCount;
-
-                            if (needRefresh) RequestRefresh(180);
-                        }
-                    }
-                    catch (Exception ex) { Log("SheetActivate count check error: {0}", ex.Message); }
                 }
             };
 
@@ -425,7 +429,8 @@ namespace Qtab
             try
             {
                 var control = new QTabNavi();
-                control.OnSheetSelected += name => ActivateSheet(name);
+                var ownerWindowKey = key;
+                control.OnSheetSelected += name => RequestActivateSheet(ownerWindowKey, name);
                 control.DockLeftRequested += () => SetDock(Office.MsoCTPDockPosition.msoCTPDockPositionLeft);
                 control.DockRightRequested += () => SetDock(Office.MsoCTPDockPosition.msoCTPDockPositionRight);
                 control.GroupRequested += names => GroupSheetsForActiveWorkbook(names);
@@ -1257,21 +1262,110 @@ namespace Qtab
             }
         }
 
-        /// <summary>在 Excel 中激活指定名称的工作表。</summary>
+        /// <summary>
+        /// 在 Excel 中激活指定名称的工作表。
+        /// </summary>
         private void ActivateSheet(string name)
         {
-            var wb = this.Application.ActiveWorkbook;
+            ActivateSheetForWindow(GetActiveWindowKey(), name);
+        }
+
+        /// <summary>
+        /// 在指定窗口中激活工作表，避免多窗口并排时切错窗口。
+        /// </summary>
+        private void ActivateSheetForWindow(string windowKey, string name)
+        {
+            if (string.IsNullOrEmpty(name)) return;
+
+            Excel.Window targetWindow = null;
+            try
+            {
+                if (!string.IsNullOrEmpty(windowKey) && _panesByWindow.TryGetValue(windowKey, out var pane) && pane != null)
+                {
+                    targetWindow = pane.Window as Excel.Window;
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (targetWindow == null && !string.IsNullOrEmpty(windowKey))
+                {
+                    foreach (Excel.Window w in this.Application.Windows)
+                    {
+                        try
+                        {
+                            if (string.Equals(w.Caption, windowKey, StringComparison.OrdinalIgnoreCase))
+                            {
+                                targetWindow = w;
+                                break;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+
+            Excel.Workbook wb = null;
+            try { wb = targetWindow?.Parent as Excel.Workbook; } catch { }
+            if (wb == null)
+            {
+                try { wb = this.Application.ActiveWorkbook; } catch { }
+            }
             if (wb == null) return;
+
+            try
+            {
+                if (targetWindow != null)
+                {
+                    try { targetWindow.Activate(); } catch { }
+                }
+
+                var active = this.Application.ActiveSheet as Excel.Worksheet;
+                if (active != null && string.Equals(active.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+            catch { }
+
             var ws = wb.Worksheets.Cast<Excel.Worksheet>().FirstOrDefault(x => x.Name == name);
             if (ws != null)
             {
-                try
+                try { ws.Activate(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// 请求激活工作表：将快速连续点击合并为最后一次，减少点击路径同步阻塞。
+        /// </summary>
+        private void RequestActivateSheet(string name)
+        {
+            RequestActivateSheet(GetActiveWindowKey(), name);
+        }
+
+        /// <summary>
+        /// 请求在指定窗口激活工作表：将快速连续点击合并为最后一次，减少点击路径同步阻塞。
+        /// </summary>
+        private void RequestActivateSheet(string windowKey, string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return;
+            try
+            {
+                _pendingWindowKeyToActivate = windowKey;
+                _pendingSheetToActivate = name;
+                if (_activateSheetTimer == null)
                 {
-                    ws.Activate();
-                    // **优化**：移除这里的 RefreshSheetList 调用
-                    // 激活操作由 SheetActivate 事件处理高亮即可
+                    ActivateSheetForWindow(windowKey, name);
+                    return;
                 }
-                catch { }
+                _activateSheetTimer.Stop();
+                _activateSheetTimer.Start();
+            }
+            catch
+            {
+                try { ActivateSheetForWindow(windowKey, name); } catch { }
             }
         }
 
@@ -1476,6 +1570,9 @@ namespace Qtab
 
             // 停止轮询计时器
             try { _pollTimer?.Stop(); _pollTimer?.Dispose(); } catch { }
+
+            // 停止工作表激活计时器
+            try { _activateSheetTimer?.Stop(); _activateSheetTimer?.Dispose(); } catch { }
 
             // restore hidden Ply controls
             RestorePlyControls();

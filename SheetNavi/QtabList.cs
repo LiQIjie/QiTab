@@ -79,7 +79,9 @@ namespace Qtab
         private Point _dragStartPoint;      // 拖拽开始位置
         private HitInfo _dragOverHit;       // 当前拖拽悬停的项
         private const int DragThreshold = 5; // 拖拽触发阈值（像素）
-        
+        // 记录是否已在 MouseDown 提前触发了工作表激活，避免 MouseUp 重复触发
+        private string _mouseDownActivatedSheet;
+
         // 拖拽事件
         public event Action<string, string, bool> SheetDragDropRequested;  // (draggedSheet, targetSheet, insertBefore)
         public event Action<string, string, bool> GroupDragDropRequested;  // (draggedGroup, targetItem, insertBefore)
@@ -341,6 +343,7 @@ namespace Qtab
         private void OnMouseDown(object sender, MouseEventArgs e)
         {
             Focus();
+            _mouseDownActivatedSheet = null;
 
             // If an inline edit is active and the user clicked outside the edit box, end editing.
             if (_editBox?.Visible == true)
@@ -371,12 +374,51 @@ namespace Qtab
                 return;
             }
 
+            // 左键简单点击工作表时提前触发激活，提升跟手感
+            if (e.Button == MouseButtons.Left && hit.Type == HitType.Sheet)
+            {
+                bool ctrl = (ModifierKeys & Keys.Control) != 0;
+                bool shift = (ModifierKeys & Keys.Shift) != 0;
+                if (!ctrl && !shift)
+                {
+                    _selected.Clear();
+                    _selected.Add(hit.Sheet);
+                    _lastSelected = hit.Sheet;
+                    _mouseDownActivatedSheet = hit.Sheet;
+                    RaiseSheetSelectedAsync(hit.Sheet);
+                    Invalidate();
+                }
+            }
+
             // 左键：记录拖拽起始信息（用于工作表和分组头）
             if (e.Button == MouseButtons.Left && (hit.Type == HitType.Sheet || hit.Type == HitType.GroupHeader))
             {
                 _dragStartHit = hit;
                 _dragStartPoint = e.Location;
                 _isDragging = false;
+            }
+        }
+
+        /// <summary>
+        /// 将工作表选中事件异步投递到 UI 消息队列，避免在鼠标事件中同步触发 Excel 激活导致短暂忙碌光标。
+        /// </summary>
+        private void RaiseSheetSelectedAsync(string sheetName)
+        {
+            if (string.IsNullOrEmpty(sheetName)) return;
+            try
+            {
+                if (IsHandleCreated)
+                {
+                    BeginInvoke(new Action(() => OnSheetSelected?.Invoke(sheetName)));
+                }
+                else
+                {
+                    OnSheetSelected?.Invoke(sheetName);
+                }
+            }
+            catch
+            {
+                try { OnSheetSelected?.Invoke(sheetName); } catch { }
             }
         }
 
@@ -437,7 +479,10 @@ namespace Qtab
                     _selected.Clear();
                     _selected.Add(hit.Sheet);
                     _lastSelected = hit.Sheet;
-                    OnSheetSelected?.Invoke(hit.Sheet);
+                    if (!string.Equals(_mouseDownActivatedSheet, hit.Sheet, StringComparison.OrdinalIgnoreCase))
+                    {
+                        RaiseSheetSelectedAsync(hit.Sheet);
+                    }
                 }
                 Invalidate();
             }
@@ -447,7 +492,7 @@ namespace Qtab
                 _selected.Clear();
                 foreach (var s in hit.Group.Members) _selected.Add(s);
                 _lastSelected = hit.Group.Members.FirstOrDefault();
-                if (!string.IsNullOrEmpty(_lastSelected)) OnSheetSelected?.Invoke(_lastSelected);
+                if (!string.IsNullOrEmpty(_lastSelected)) RaiseSheetSelectedAsync(_lastSelected);
                 Invalidate();
 
                 // 如果在相同位置快速连续点击分组头，则触发一次“重命名”意图（由上层处理内联重命名）
