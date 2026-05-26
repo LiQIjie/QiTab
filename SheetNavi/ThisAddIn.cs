@@ -1535,11 +1535,9 @@ namespace Qtab
                 _sheetPane = pane;
                 bool isLeft = true;
                 try { isLeft = pane.DockPosition == Office.MsoCTPDockPosition.msoCTPDockPositionLeft; } catch { }
-                
-                // **优化**：使用当前窗口控件
+
                 var control = GetControlForActiveWindow();
                 try { control?.SetDockIndicator(isLeft); } catch { }
-                try { control?.Focus(); } catch { }
                 try { UpdateToolButtonsStatus(control); } catch { }
             }
             catch { }
